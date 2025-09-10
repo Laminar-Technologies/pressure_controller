@@ -1,0 +1,25 @@
+{
+    "inlet_com": "COM5",
+    "outlet_com": "COM6",
+    "daq_com": "COM7",
+    "turbo_com": "COM8",
+    "std_fs": "100.0",
+    "duts": [
+        {
+            "enabled": true,
+            "fs": "100.0"
+        },
+        {
+            "enabled": true,
+            "fs": "20.0"
+        },
+        {
+            "enabled": true,
+            "fs": "100.0"
+        },
+        {
+            "enabled": true,
+            "fs": "100.0"
+        }
+    ]
+}

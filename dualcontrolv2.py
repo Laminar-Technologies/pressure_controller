@@ -2,14 +2,14 @@
 # ==============================================================================
 # Script Name: Multi-Device Integrated Calibration Script
 # Author: Gemini
-# Date: August 28, 2025
+# Date: September 2, 2025
 #
-# Version 64 (Production Ready - Leak Up Recovery):
-#   - Added a "Leak Up" detection mode. If the inlet valve is fully closed
-#     but pressure is still high, the script now correctly identifies that
-#     the outlet is too closed and gently opens it to compensate.
-#   - This resolves the final known edge case where an aggressive emergency
-#     descent could cause the system to get stuck.
+# Version 66.1 (Hotfix - Plot Legibility):
+#   - Modified the Deviation Plot to use Matplotlib's automatic tick locator
+#     for the Y-axis (Setpoints).
+#   - This prevents setpoint labels from bunching up and overlapping when
+#     there is a high density of points in one area, ensuring the axis is
+#     always legible.
 # ==============================================================================
 
 import serial
@@ -21,6 +21,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import matplotlib.patches as patches
+import matplotlib.transforms as transforms
 import tkinter as tk
 from tkinter import scrolledtext, ttk, messagebox
 import threading
@@ -344,7 +346,7 @@ class StateMachinePressureController:
             self.is_connected = False
         
 # =================================================================================
-# Main GUI Class (No changes needed below this line)
+# Main GUI Class
 # =================================================================================
 class CalibrationGUI(tk.Tk):
     def __init__(self):
@@ -363,14 +365,13 @@ class CalibrationGUI(tk.Tk):
         self.dut_colors = ['#2ca02c', '#d62728', '#9467bd', '#8c564b']
         
         self.data_storage = {}
+        self.error_plot_data = {} # New storage for the deviation plot
         self.log_queue = queue.Queue()
         
         self.manual_focus_device = tk.StringVar(value="std")
         self.manual_focus_channel = None
 
         self.live_time_history = collections.deque(maxlen=500)
-        self.live_inlet_valve_history = collections.deque(maxlen=500)
-        self.live_outlet_valve_history = collections.deque(maxlen=500)
         self.live_std_pressure_history = collections.deque(maxlen=500)
         self.live_dut_pressure_history = {i: collections.deque(maxlen=500) for i in range(4)}
 
@@ -385,7 +386,9 @@ class CalibrationGUI(tk.Tk):
     def setup_ui(self):
         top_config_frame = tk.Frame(self)
         top_config_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=5)
-        top_config_frame.columnconfigure(0, weight=1); top_config_frame.columnconfigure(1, weight=1)
+        top_config_frame.columnconfigure(0, weight=2)
+        top_config_frame.columnconfigure(1, weight=2)
+        top_config_frame.columnconfigure(2, weight=1)
 
         config_frame = tk.LabelFrame(top_config_frame, text="Configuration", padx=10, pady=10)
         config_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
@@ -395,13 +398,13 @@ class CalibrationGUI(tk.Tk):
 
         tk.Label(config_frame, text="Inlet Controller (Inverse):").grid(row=0, column=0, sticky="w", columnspan=2)
         tk.Label(config_frame, text="COM Port:").grid(row=1, column=0, sticky="e", padx=5)
-        self.inlet_com_var = tk.StringVar(self, value="COM9")
+        self.inlet_com_var = tk.StringVar(self, value="COM5")
         self.inlet_com_combo = ttk.Combobox(config_frame, textvariable=self.inlet_com_var, values=com_ports, width=10)
         self.inlet_com_combo.grid(row=1, column=1, sticky="w")
         
         tk.Label(config_frame, text="Outlet Controller (Direct):").grid(row=2, column=0, sticky="w", pady=(8,0), columnspan=2)
         tk.Label(config_frame, text="COM Port:").grid(row=3, column=0, sticky="e", padx=5)
-        self.outlet_com_var = tk.StringVar(self, value="COM8")
+        self.outlet_com_var = tk.StringVar(self, value="COM6")
         self.outlet_com_combo = ttk.Combobox(config_frame, textvariable=self.outlet_com_var, values=com_ports, width=10)
         self.outlet_com_combo.grid(row=3, column=1, sticky="w")
 
@@ -412,12 +415,12 @@ class CalibrationGUI(tk.Tk):
 
         tk.Label(config_frame, text="DAQ (RP2040):").grid(row=5, column=0, sticky="w", pady=(10,0), columnspan=2)
         tk.Label(config_frame, text="COM Port:").grid(row=6, column=0, sticky="e", padx=5)
-        self.daq_com_var = tk.StringVar(self, value="COM12")
+        self.daq_com_var = tk.StringVar(self, value="COM7")
         self.daq_com_combo = ttk.Combobox(config_frame, textvariable=self.daq_com_var, values=com_ports, width=10)
         self.daq_com_combo.grid(row=6, column=1, sticky="w")
 
         dut_frame = tk.LabelFrame(top_config_frame, text="Devices Under Test (DUTs)", padx=10, pady=10)
-        dut_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
+        dut_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 5))
         self.dut_widgets = []
         for i in range(4):
             tk.Label(dut_frame, text=f"Device {i+1} (DAQ Ch {i}):").grid(row=i, column=0, sticky="w")
@@ -431,15 +434,38 @@ class CalibrationGUI(tk.Tk):
             menu.grid(row=i, column=3)
             self.dut_widgets.append({'enabled': enabled_var, 'fs': fs_var, 'check': check, 'menu': menu})
 
+        valve_status_frame = tk.LabelFrame(top_config_frame, text="Live Valve Status", padx=10, pady=10)
+        valve_status_frame.grid(row=0, column=2, sticky="nsew", padx=(0, 0))
+        valve_status_frame.columnconfigure(0, weight=1)
+        valve_status_frame.columnconfigure(1, weight=1)
+
+        tk.Label(valve_status_frame, text="Inlet Valve").grid(row=0, column=0)
+        tk.Label(valve_status_frame, text="Outlet Valve").grid(row=0, column=1)
+        self.inlet_pos_var = tk.StringVar(value="-- %")
+        self.outlet_pos_var = tk.StringVar(value="-- %")
+        tk.Label(valve_status_frame, textvariable=self.inlet_pos_var, font=("Helvetica", 16, "bold")).grid(row=1, column=0)
+        tk.Label(valve_status_frame, textvariable=self.outlet_pos_var, font=("Helvetica", 16, "bold")).grid(row=1, column=1)
+
+        self.inlet_valve_fig, self.ax_inlet_valve = plt.subplots(figsize=(1.5, 1.5), dpi=80)
+        self.outlet_valve_fig, self.ax_outlet_valve = plt.subplots(figsize=(1.5, 1.5), dpi=80)
+
+        self.inlet_valve_canvas = FigureCanvasTkAgg(self.inlet_valve_fig, master=valve_status_frame)
+        self.outlet_valve_canvas = FigureCanvasTkAgg(self.outlet_valve_fig, master=valve_status_frame)
+
+        self._draw_valve(self.ax_inlet_valve, 0)
+        self._draw_valve(self.ax_outlet_valve, 0)
+
+        self.inlet_valve_canvas.get_tk_widget().grid(row=2, column=0, pady=(5,0))
+        self.outlet_valve_canvas.get_tk_widget().grid(row=2, column=1, pady=(5,0))
+
         self.plot_term_frame = tk.Frame(self)
         self.plot_term_frame.grid(row=1, column=0, sticky="nsew")
         self.plot_term_frame.rowconfigure(0, weight=1); self.plot_term_frame.columnconfigure(0, weight=1)
-
-        self.fig = plt.figure(figsize=(12, 10))
-        gs = gridspec.GridSpec(2, 2, figure=self.fig)
-        self.ax_cal = self.fig.add_subplot(gs[0, :])
-        self.ax_live_pressure = self.fig.add_subplot(gs[1, 0])
-        self.ax_live_valves = self.fig.add_subplot(gs[1, 1])
+        
+        self.fig = plt.figure(figsize=(12, 8))
+        gs = gridspec.GridSpec(1, 2, width_ratios=[3, 1], figure=self.fig)
+        self.ax_live_pressure = self.fig.add_subplot(gs[0, 0])
+        self.ax_error = self.fig.add_subplot(gs[0, 1])
         self.fig.tight_layout(pad=3.0)
 
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.plot_term_frame)
@@ -449,7 +475,7 @@ class CalibrationGUI(tk.Tk):
         term_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
         term_frame.columnconfigure(0, weight=1)
         
-        self.terminal_text = scrolledtext.ScrolledText(term_frame, height=10, font=("Courier", 10), bg="#1e1e1e", fg="#00ff00")
+        self.terminal_text = scrolledtext.ScrolledText(term_frame, height=8, font=("Courier", 10), bg="#1e1e1e", fg="#00ff00")
         self.terminal_text.pack(fill="both", expand=True)
         
         input_frame = tk.Frame(term_frame)
@@ -469,6 +495,36 @@ class CalibrationGUI(tk.Tk):
         self.start_button.pack(side=tk.LEFT, padx=5)
         self.e_stop_button = tk.Button(action_frame, text="E-Stop", command=self.e_stop_action, bg="red", fg="white", state=tk.DISABLED, width=15)
         self.e_stop_button.pack(side=tk.LEFT, padx=5)
+
+    def _draw_valve(self, ax, position_percent):
+        """Helper function to draw a butterfly valve graphic on a given axis."""
+        ax.clear()
+        ax.set_xlim(-1.2, 1.2)
+        ax.set_ylim(-1.2, 1.2)
+        ax.axis('off')
+
+        valve_body = patches.Circle((0, 0), 1, facecolor='#c0c0c0', edgecolor='black', linewidth=1.5)
+        ax.add_patch(valve_body)
+        
+        normalized_pos = position_percent / 100.0
+        scaled_pos = normalized_pos ** 0.5
+        
+        final_angle_deg = scaled_pos * 90.0
+        final_angle_rad = np.deg2rad(final_angle_deg)
+        
+        ellipse_width = 2 * np.cos(final_angle_rad)
+        
+        butterfly = patches.Ellipse((0,0), width=ellipse_width, height=2, facecolor='#5a5a5a', edgecolor='black')
+        
+        transform = transforms.Affine2D().rotate_deg(90 - final_angle_deg) + ax.transData
+        butterfly.set_transform(transform)
+
+        ax.add_patch(butterfly)
+        
+        if ax == self.ax_inlet_valve:
+            self.inlet_valve_canvas.draw_idle()
+        elif ax == self.ax_outlet_valve:
+            self.outlet_valve_canvas.draw_idle()
 
     def send_manual_command(self, event=None):
         command = self.command_entry.get().strip()
@@ -525,17 +581,9 @@ class CalibrationGUI(tk.Tk):
             self.e_stop_button.config(state=tk.DISABLED)
         
     def configure_plots(self):
-        self.ax_cal.clear(); self.ax_live_pressure.clear(); self.ax_live_valves.clear()
-
-        self.ax_cal.set_title("Calibration Curve: Standard vs. Devices")
-        self.ax_cal.set_xlabel("Standard Pressure (Torr)"); self.ax_cal.set_ylabel("Device Pressure (Torr)")
-        self.ax_cal.grid(True)
-        max_fs = self.standard_fs_value
-        for dut in self.active_duts: max_fs = max(max_fs, dut['fs'])
-        self.ax_cal.set_xlim([0, max_fs*1.05]); self.ax_cal.set_ylim([0, max_fs*1.05])
-        self.ax_cal.plot([0, max_fs], [0, max_fs], 'k--', alpha=0.5, label='Ideal 1:1 Line')
+        self.ax_live_pressure.clear(); self.ax_error.clear()
         
-        self.ax_live_pressure.set_title("Live Pressure"); self.ax_live_pressure.set_xlabel("Time (s)")
+        self.ax_live_pressure.set_title("Live Pressure Trace"); self.ax_live_pressure.set_xlabel("Time (s)")
         self.ax_live_pressure.set_ylabel("Pressure (Torr)"); self.ax_live_pressure.grid(True, linestyle=':')
         self.live_std_plot, = self.ax_live_pressure.plot([], [], 'blue', linewidth=2, label='Standard')
         self.live_dut_plots = {}
@@ -544,14 +592,32 @@ class CalibrationGUI(tk.Tk):
             self.live_dut_plots[i] = line
         self.ax_live_pressure.legend(loc='upper left')
 
-        self.ax_live_valves.set_title("Live Valve Positions"); self.ax_live_valves.set_xlabel("Time (s)")
-        self.ax_live_valves.set_ylabel("Valve Position (%)"); self.ax_live_valves.grid(True, linestyle=':')
-        self.ax_live_valves.set_ylim([-5, 105])
-        self.live_inlet_valve_plot, = self.ax_live_valves.plot([], [], color='green', linestyle='--', label='Inlet Valve')
-        self.live_outlet_valve_plot, = self.ax_live_valves.plot([], [], color='red', linestyle=':', label='Outlet Valve')
-        self.ax_live_valves.legend(loc='upper left')
+        self.ax_error.set_title("DUT Deviation from Standard")
+        self.ax_error.set_xlabel("Error (Torr)")
+        self.ax_error.set_ylabel("Setpoint (Torr)")
+        self.ax_error.axvline(0, color='k', linestyle='--', alpha=0.5)
+        self.ax_error.grid(True, axis='x', linestyle=':')
 
         self.canvas.draw_idle()
+
+    def _setup_error_plot(self, setpoints):
+        """Helper to configure the error plot once setpoints are known."""
+        self.ax_error.clear()
+        self.ax_error.set_title("DUT Deviation")
+        self.ax_error.set_xlabel("Error (Torr)")
+        self.ax_error.set_ylabel("Setpoint (Torr)")
+        
+        # --- MODIFIED: Let Matplotlib determine the best ticks ---
+        # Instead of forcing a tick for every setpoint, we just set the limits
+        # and let the library choose a legible number of labels.
+        if setpoints:
+            self.ax_error.set_ylim(min(setpoints) - 5, max(setpoints) + 5)
+        
+        self.ax_error.axvline(0, color='k', linestyle='--', alpha=0.5)
+        self.ax_error.grid(True, linestyle=':')
+        
+        handles = [patches.Patch(color=self.dut_colors[dut['channel']], label=f"DUT {dut['channel']+1}") for dut in self.active_duts]
+        self.ax_error.legend(handles=handles, loc='best')
 
     def log_message(self, message):
         self.log_queue.put(message)
@@ -592,8 +658,22 @@ class CalibrationGUI(tk.Tk):
         if self.state_controller and self.state_controller.is_connected:
             current_time = time.time() - self.start_time
             self.live_time_history.append(current_time)
-            self.live_inlet_valve_history.append(self.state_controller.inlet_valve_pos)
-            self.live_outlet_valve_history.append(self.state_controller.outlet_valve_pos)
+            
+            try:
+                raw_inlet_pos = self.state_controller.inlet_valve_pos
+                raw_outlet_pos = self.state_controller.outlet_valve_pos
+
+                display_inlet_pos = 100.0 - raw_inlet_pos if raw_inlet_pos is not None else 0.0
+                display_outlet_pos = raw_outlet_pos if raw_outlet_pos is not None else 0.0
+                
+                self.inlet_pos_var.set(f"{display_inlet_pos:.1f} %")
+                self.outlet_pos_var.set(f"{display_outlet_pos:.1f} %")
+                
+                self._draw_valve(self.ax_inlet_valve, display_inlet_pos)
+                self._draw_valve(self.ax_outlet_valve, display_outlet_pos)
+            except Exception:
+                pass
+            
             self.live_std_pressure_history.append(self.state_controller.current_pressure)
             
             for i in range(4):
@@ -606,8 +686,6 @@ class CalibrationGUI(tk.Tk):
                 else:
                     self.live_dut_pressure_history[i].append(np.nan)
 
-            self.live_inlet_valve_plot.set_data(self.live_time_history, self.live_inlet_valve_history)
-            self.live_outlet_valve_plot.set_data(self.live_time_history, self.live_outlet_valve_history)
             self.live_std_plot.set_data(self.live_time_history, self.live_std_pressure_history)
             
             for i, line in self.live_dut_plots.items():
@@ -616,10 +694,7 @@ class CalibrationGUI(tk.Tk):
             
             t_max = self.live_time_history[-1] if self.live_time_history else 0
             self.ax_live_pressure.set_xlim(max(0, t_max - 90), t_max + 1)
-            self.ax_live_valves.set_xlim(max(0, t_max - 90), t_max + 1)
             self.ax_live_pressure.relim(); self.ax_live_pressure.autoscale_view(scaley=True)
-            self.ax_live_valves.relim(); self.ax_live_valves.autoscale_view(scaley=True)
-            self.ax_live_valves.set_ylim([-5, 105])
 
             self.canvas.draw_idle()
         
@@ -745,6 +820,7 @@ class CalibrationGUI(tk.Tk):
         self.data_storage = {'Setpoint_Torr': [], 'Standard_Pressure_Torr': []}
         for dut in self.active_duts:
             self.data_storage[f'Device_{dut["channel"]+1}_Pressure_Torr'] = []
+        self.error_plot_data.clear() # Clear previous run data
         
         self.start_button.config(state=tk.DISABLED); self.manual_cal_button.config(state=tk.DISABLED)
         self.e_stop_button.config(state=tk.NORMAL)
@@ -759,6 +835,9 @@ class CalibrationGUI(tk.Tk):
             
             setpoints = sorted(list(master_setpoints))
             self.log_message(f"Generated composite setpoints: {setpoints}")
+
+            # Configure the error plot with the generated setpoints
+            self.after(0, self._setup_error_plot, setpoints)
 
             dut_specific_setpoints = {
                 dut['channel']: {round(dut['fs'] * i / 100, 2) for i in range(0, 101, 10)}
@@ -852,8 +931,13 @@ class CalibrationGUI(tk.Tk):
                     self.data_storage[f'Device_{ch+1}_Pressure_Torr'].append(mean_dut)
                     if not np.isnan(mean_dut):
                         log_line += f" | Dev {ch+1} (Avg): {mean_dut:.3f} Torr"
+                        
+                        # Store data for the new error plot
+                        error = mean_dut - mean_standard
+                        if sp not in self.error_plot_data: self.error_plot_data[sp] = {}
+                        self.error_plot_data[sp][ch] = error
+
                         if sp in dut_specific_setpoints[ch]:
-                            error = mean_dut - mean_standard
                             tolerance = fs * 0.005
                             if abs(error) > tolerance:
                                 self.log_message(f"  ⚠️ WARNING: Device {ch+1} OUTSIDE tolerance! Error: {error:+.4f} Torr")
@@ -861,7 +945,7 @@ class CalibrationGUI(tk.Tk):
                         log_line += f" | Dev {ch+1}: READ FAILED"
 
                 self.log_message(log_line)
-                self.after(0, self.update_cal_plot)
+                self.after(0, self.update_error_plot)
             
             if self.is_calibrating:
                 self.log_message("\n--- Data Logging Complete. Saving data... ---")
@@ -932,49 +1016,37 @@ class CalibrationGUI(tk.Tk):
         self.log_message(final_suggestion_text)
         if any_suggestions: self.show_tuning_suggestions_window(final_suggestion_text)
 
-    def update_cal_plot(self):
-        self.ax_cal.clear()
-        self.ax_cal.set_title("Calibration Curve: Standard vs. Devices")
-        self.ax_cal.set_xlabel("Standard Pressure (Torr)"); self.ax_cal.set_ylabel("Device Pressure (Torr)")
-        self.ax_cal.grid(True)
-
-        max_reading = 0
-        min_reading = 0
-
-        all_data = []
-        if 'Standard_Pressure_Torr' in self.data_storage:
-            all_data.extend(self.data_storage['Standard_Pressure_Torr'])
-        for dut in self.active_duts:
-            key = f'Device_{dut["channel"]+1}_Pressure_Torr'
-            if key in self.data_storage:
-                all_data.extend(self.data_storage[key])
+    def update_error_plot(self):
+        """Redraws the horizontal bar plot with the latest deviation data."""
+        all_setpoints = sorted(self.error_plot_data.keys())
+        if not all_setpoints:
+            return
+            
+        self._setup_error_plot(all_setpoints)
         
-        valid_data = [v for v in all_data if not np.isnan(v)]
-        if valid_data:
-            max_reading = max(valid_data)
-            min_reading = min(valid_data)
-
-        highest_val = max(max_reading, self.standard_fs_value)
-        lowest_val = min(0, min_reading)
+        bar_height = 1.0 # Default bar height, adjust if needed
+        num_duts = len(self.active_duts)
         
-        plot_upper_limit = highest_val * 1.10
-        plot_lower_limit = lowest_val - abs(highest_val * 0.05)
-
-        self.ax_cal.set_xlim([plot_lower_limit, plot_upper_limit])
-        self.ax_cal.set_ylim([plot_lower_limit, plot_upper_limit])
+        # Calculate a sensible bar height to avoid overlap
+        if len(all_setpoints) > 1:
+            # Find the minimum gap between consecutive setpoints
+            min_gap = min(np.diff(all_setpoints))
+            bar_height = min(min_gap * 0.8, 2.0) # Cap the height
         
-        self.ax_cal.plot([plot_lower_limit, plot_upper_limit], [plot_lower_limit, plot_upper_limit], 'k--', alpha=0.5, label='Ideal 1:1 Line')
+        bar_height /= num_duts
         
-        std_data = self.data_storage.get('Standard_Pressure_Torr', [])
-        for dut in self.active_duts:
-            dut_data = self.data_storage.get(f'Device_{dut["channel"]+1}_Pressure_Torr', [])
-            valid_points = [(s, d) for s, d in zip(std_data, dut_data) if not (np.isnan(s) or np.isnan(d))]
-            if valid_points:
-                std_plot, dut_plot = zip(*valid_points)
-                color = self.dut_colors[dut['channel']]
-                self.ax_cal.plot(std_plot, dut_plot, 'o-', label=f'Device {dut["channel"]+1}', color=color)
-
-        self.ax_cal.legend()
+        for i, dut in enumerate(self.active_duts):
+            ch = dut['channel']
+            offset = (i - (num_duts - 1) / 2) * bar_height
+            
+            for sp, errors in self.error_plot_data.items():
+                if ch in errors:
+                    error_val = errors[ch]
+                    self.ax_error.barh(sp + offset, error_val, height=bar_height,
+                                       color=self.dut_colors[ch], edgecolor='black', linewidth=0.5)
+        
+        self.ax_error.relim()
+        self.ax_error.autoscale_view(scalex=True, scaley=False) # Autoscale X, but keep Y fixed
         self.canvas.draw_idle()
 
     def on_closing(self):
