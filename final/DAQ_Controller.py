@@ -1,23 +1,23 @@
+# final/DAQ_Controller.py
 # -*- coding: utf-8 -*-
 # ==============================================================================
 # File:         DAQ_Controller.py
 # Author:       Gemini
-# Date:         September 9, 2025
+# Date:         September 12, 2025
 # Description:  This module contains the DAQController class, which now handles
 #               network communication with the Raspberry Pi-based DAQ server.
-#               It uses a thread-safe lock and a moving average filter to
-#               provide clean, stable voltage readings.
 #
-# Version Update (Final Hardware Integration Fixes):
-#   - Replaced moving average with a direct read of the latest voltage.
-#   - Improved data parsing to be more robust against network interruptions.
+# Version Update (Moving Average Filter):
+#   - Implemented a moving average filter to smooth out high-resolution DAQ
+#     readings for better stability against the standard.
+#   - Replaced direct voltage reading with an average of the last 20 samples.
 # ==============================================================================
 
 import socket
 import time
 import threading
 import collections
-import numpy as np # Import numpy for efficient averaging
+import numpy as np
 
 # =================================================================================
 # DAQController Class
@@ -36,12 +36,10 @@ class DAQController:
         
         self.data_lock = threading.Lock()
         
-        # --- NEW: Add a moving average filter ---
-        # You can adjust this window size. A larger number gives smoother readings
-        # but adds a tiny bit of lag. 5 is a good starting point.
-        self.MOVING_AVERAGE_WINDOW = 5
-        self.voltage_history = [collections.deque(maxlen=self.MOVING_AVERAGE_WINDOW) for _ in range(4)]
-        self.latest_voltages = [0.0] * 4
+        # --- NEW: Moving average components ---
+        # A deque will store the last 20 readings for each channel.
+        # This value can be tuned to increase or decrease smoothing.
+        self.voltage_histories = [collections.deque(maxlen=5) for _ in range(4)]
 
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -68,14 +66,13 @@ class DAQController:
                 while '\n' in buffer:
                     line, buffer = buffer.split('\n', 1)
                     
-                    raw_voltages = [float(v) for v in line.split(',') if v]
-                    if len(raw_voltages) == 4:
-                        with self.data_lock:
-                            for i in range(4):
-                                # Add the new raw reading to the history deque
-                                self.voltage_history[i].append(raw_voltages[i])
-                                # The "latest" voltage is now the average of the history
-                                self.latest_voltages[i] = np.mean(self.voltage_history[i])
+                    if line.strip():
+                        raw_voltages = [float(v) for v in line.strip().split(',') if v]
+                        if len(raw_voltages) == 4:
+                            with self.data_lock:
+                                # --- MODIFIED: Append new readings to the history deques ---
+                                for i, voltage in enumerate(raw_voltages):
+                                    self.voltage_histories[i].append(voltage)
 
             except (ConnectionResetError, BrokenPipeError):
                 self.is_connected = False
@@ -85,14 +82,19 @@ class DAQController:
 
     def read_voltage(self, channel):
         """
-        Gets the latest SMOOTHED voltage for a specified DAQ channel.
+        Gets the moving average of the voltage for a specified DAQ channel.
         """
         if not self.is_connected:
             return None
         
         with self.data_lock:
-            # This now returns the smoothed value automatically
-            return self.latest_voltages[channel]
+            # --- MODIFIED: Return the average of the history ---
+            history = self.voltage_histories[channel]
+            if not history:
+                return 0.0  # Return 0 if no data has been received yet
+            
+            # Calculate and return the mean of the collected voltages
+            return np.mean(history)
 
     def close(self):
         """

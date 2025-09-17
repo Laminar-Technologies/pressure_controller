@@ -4,34 +4,51 @@
     "daq_ip": "192.168.1.238",
     "turbo_com": "COM8",
     "std_fs": "0.1",
+    "tech_id": "TH",
     "duts": [
         {
-            "enabled": true,
+            "enabled": false,
             "fs": "0.1",
             "model": "",
             "serial": "",
-            "wip": ""
+            "wip": "",
+            "customer": "Applied Materials",
+            "item_number": "1350-00856"
         },
         {
-            "enabled": true,
+            "enabled": false,
             "fs": "0.1",
             "model": "",
             "serial": "",
-            "wip": ""
+            "wip": "",
+            "customer": "Applied Materials",
+            "item_number": "1350-00856"
         },
         {
-            "enabled": true,
+            "enabled": false,
             "fs": "0.1",
             "model": "",
             "serial": "",
-            "wip": ""
+            "wip": "",
+            "customer": "Applied Materials",
+            "item_number": "1350-00856"
         },
         {
-            "enabled": true,
+            "enabled": false,
             "fs": "0.1",
             "model": "",
             "serial": "",
-            "wip": ""
+            "wip": "",
+            "customer": "Applied Materials",
+            "item_number": "1350-00856"
         }
-    ]
+    ],
+    "service_types": [
+        "Level 1 Repair"
+    ],
+    "last_service_type": "Level 1 Repair",
+    "std_ids": [
+        "PVS 100"
+    ],
+    "last_std_id": "PVS 100"
 }

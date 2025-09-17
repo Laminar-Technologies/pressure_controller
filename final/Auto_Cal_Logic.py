@@ -1,40 +1,47 @@
-# -*- coding: utf-8 -*-
-# ==============================================================================
-# File:         Auto_Cal_Logic.py
-# Author:       Gemini
-# Date:         September 5, 2025
-# Description:  This module contains the core logic for running the automated
-#               calibration sequence. It is called by the main GUI to handle
-#               the step-by-step process of setting pressure points, checking
-#               for stability, and logging data.
-#
-# Version Update (Dynamic Plotting):
-#   - Added logic to mark DUTs as complete when their FS range is exceeded.
-#   - Logs NaN for out-of-range DUTs to ensure final plots are scaled correctly.
-# ==============================================================================
-
+# final/Auto_Cal_Logic.py
 import time
 import statistics
 import numpy as np
 import pandas as pd
 from tkinter import messagebox
 import tkinter as tk
+import threading
+import os
 
+from Cert_Generator import generate_certificate
 
 def run_calibration(app):
     """
     The main logic for the automated calibration sequence.
-
-    Args:
-        app (CalibrationGUI): The instance of the main application GUI.
     """
+    # --- BEGIN NEW VALIDATION LOGIC ---
+    for dut in app.active_duts:
+        wip = dut.get('wip', '').strip()
+        serial = dut.get('serial', '').strip()
+        model = dut.get('model', '').strip()
+        
+        if not all([wip, serial, model]):
+            error_message = f"DUT {dut['channel']+1} is missing required information.\n\nPlease provide a value for:\n"
+            missing_fields = []
+            if not wip: missing_fields.append("- WIP #")
+            if not serial: missing_fields.append("- S/N")
+            if not model: missing_fields.append("- Model #")
+            
+            messagebox.showerror("Missing Information", error_message + "\n".join(missing_fields))
+            app.is_calibrating = False
+            app.start_button.config(state=tk.NORMAL)
+            app.e_stop_button.config(state=tk.DISABLED)
+            return 
+    # --- END NEW VALIDATION LOGIC ---
+
     run_start_time = time.time()
     try:
-        # Generate a composite list of setpoints from all active devices
         master_setpoints = set()
-        for i in range(0, 101, 10): master_setpoints.add(round(app.standard_fs_value * i / 100, 2))
+        for i in range(0, 101, 10):
+            master_setpoints.add(round(app.standard_fs_value * i / 100, 2))
         for dut in app.active_duts:
-            for i in range(0, 101, 10): master_setpoints.add(round(dut['fs'] * i / 100, 2))
+            for i in range(0, 101, 10):
+                master_setpoints.add(round(dut['fs'] * i / 100, 2))
         setpoints = sorted(list(master_setpoints))
         app.log_message(f"Generated composite setpoints: {setpoints}")
 
@@ -42,74 +49,77 @@ def run_calibration(app):
 
         dut_specific_setpoints = {dut['channel']: {round(dut['fs'] * i / 100, 2) for i in range(0, 101, 10)} for dut in app.active_duts}
         
-        # --- NEW: Set to track completed DUTs ---
         app.completed_duts.clear()
 
         for sp in setpoints:
             if not app.is_calibrating: break
             
-            # --- NEW: Check which DUTs are still active for this setpoint ---
-            # A DUT is considered complete if the setpoint is > 105% of its FS range.
             for dut in app.active_duts:
-                if sp > dut['fs'] * 1.05:
-                    if dut['channel'] not in app.completed_duts:
-                        app.log_message(f"--- DUT {dut['channel']+1} ({dut['fs']} Torr) completed. Hiding trace. ---")
-                        app.completed_duts.add(dut['channel'])
+                if sp > dut['fs'] * 1.05 and dut['channel'] not in app.completed_duts:
+                    app.log_message(f"--- DUT {dut['channel']+1} ({dut['fs']} Torr) range completed. Hiding trace. ---")
+                    app.completed_duts.add(dut['channel'])
 
-            # If all DUTs are complete, we can stop the calibration early
             if len(app.completed_duts) == len(app.active_duts):
                 app.log_message("All DUTs have completed their calibration ranges. Ending run early.")
                 break
 
             setpoint_start_time = time.time()
-            predicted_pos = app._predict_outlet_position(sp)
             app.log_message(f"\n--- Setting {sp} Torr ---")
-            app.state_controller.set_pressure(sp, predicted_outlet_pos=predicted_pos)
+            
+            if sp == 0.0:
+                app.state_controller.set_pressure(sp)
+            else:
+                predicted_pos = app._predict_outlet_position(sp)
+                app.state_controller.set_pressure(sp, predicted_outlet_pos=predicted_pos)
+            
             app.log_message("Waiting for pressure to stabilize...")
 
-            # --- Stability Check Loop ---
-            stability_confirmed_time = None; out_of_tolerance_start_time = None
+            stability_confirmed_time = None
+            out_of_tolerance_start_time = None
             relevant_duts = [d for d in app.active_duts if sp in dut_specific_setpoints.get(d['channel'], set())]
             priority_tolerance = min([d['fs'] * 0.005 for d in relevant_duts]) if relevant_duts else app.standard_fs_value * 0.005
 
             while app.is_calibrating:
-                if len(app.state_controller.pressure_history) < 10: time.sleep(0.5); continue
+                if len(app.state_controller.pressure_history) < 10:
+                    time.sleep(0.5)
+                    continue
 
                 is_stable = statistics.stdev(app.state_controller.pressure_history) < (app.standard_fs_value * 0.0003)
                 stable_pressure = app.state_controller.current_pressure
-                if stable_pressure is None: time.sleep(1); continue
+                if stable_pressure is None:
+                    time.sleep(1)
+                    continue
 
                 if is_stable:
                     if abs(stable_pressure - sp) <= priority_tolerance:
                         out_of_tolerance_start_time = None
                         if stability_confirmed_time is None: stability_confirmed_time = time.time()
-                        # Require 3 seconds of continuous stability before proceeding
                         if (time.time() - stability_confirmed_time) >= 3.0:
                             app.log_message(f"  Pressure locked at {stable_pressure:.3f} Torr. Proceeding to log.")
                             break
-                    else: # Stable, but out of tolerance
+                    else:
                         stability_confirmed_time = None
                         if out_of_tolerance_start_time is None:
                             app.log_message(f"  Pressure stable at {stable_pressure:.3f} Torr, but OUTSIDE tolerance (+/- {priority_tolerance:.4f} Torr).")
                             app.log_message("  Waiting 20 seconds before prompting...")
                             out_of_tolerance_start_time = time.time()
                         elif (time.time() - out_of_tolerance_start_time) >= 20.0:
-                            # Ask user to override if it can't settle automatically
                             if messagebox.askyesno("Out-of-Tolerance Override", f"Pressure is stable at {stable_pressure:.4f} Torr, but outside tolerance.\n\nAccept this reading?"):
                                 break
                             else:
-                                out_of_tolerance_start_time = None # Reset timer
+                                out_of_tolerance_start_time = None 
                 else:
-                    stability_confirmed_time = None; out_of_tolerance_start_time = None
+                    stability_confirmed_time = None
+                    out_of_tolerance_start_time = None
                 time.sleep(0.5)
 
             if not app.is_calibrating: continue
 
-            # --- Data Logging Phase ---
-            app.log_message(f"  Starting 5s data log. Locking outlet valve.")
+            app.log_message("  Starting 5s data log. Locking outlet valve.")
             app.state_controller.hold_outlet_valve = True
             log_start_time = time.time()
-            standard_readings = []; dut_readings = {dut['channel']: [] for dut in app.active_duts}
+            standard_readings = []
+            dut_readings = {dut['channel']: [] for dut in app.active_duts}
             while (time.time() - log_start_time) < 5.0 and app.is_calibrating:
                 if app.state_controller.current_pressure is not None:
                     standard_readings.append(app.state_controller.current_pressure)
@@ -119,15 +129,13 @@ def run_calibration(app):
                         dut_readings[ch].append(app.live_dut_pressure_history[ch][-1])
                 time.sleep(0.2)
             app.state_controller.hold_outlet_valve = False
-            app.log_message(f"  Data log complete. Unlocking outlet valve.")
+            app.log_message("  Data log complete. Unlocking outlet valve.")
 
             if not app.is_calibrating: continue
 
-            # --- Process and Save Logged Data ---
             mean_standard = np.mean(standard_readings) if standard_readings else np.nan
             if np.isnan(mean_standard): continue
 
-            # Learn the outlet position from this successful setpoint
             current_outlet_pos = app.state_controller.outlet_valve_pos
             if current_outlet_pos is not None:
                 sp_key = round(sp, 3)
@@ -142,12 +150,7 @@ def run_calibration(app):
 
             for dut in app.active_duts:
                 ch, fs = dut['channel'], dut['fs']
-                # --- NEW: Log NaN if the setpoint is out of range for the DUT ---
-                if sp > fs * 1.05:
-                    mean_dut = np.nan
-                else:
-                    mean_dut = np.mean(dut_readings.get(ch, [])) if dut_readings.get(ch) else np.nan
-                
+                mean_dut = np.mean(dut_readings.get(ch, [])) if dut_readings.get(ch) else np.nan
                 app.data_storage[f'Device_{ch+1}_Pressure_Torr'].append(mean_dut)
 
                 if not np.isnan(mean_dut):
@@ -156,18 +159,49 @@ def run_calibration(app):
                         error = mean_dut - mean_standard
                         if sp not in app.error_plot_data: app.error_plot_data[sp] = {}
                         app.error_plot_data[sp][ch] = {'error': error, 'time': time.time() - app.start_time}
-                        if abs(error) > (fs * 0.005): app.log_message(f"  ⚠️ WARNING: Device {ch+1} OUTSIDE tolerance! Error: {error:+.4f} Torr")
-                else: 
+                        if abs(error) > (fs * 0.005):
+                            app.log_message(f"  ⚠️ WARNING: Device {ch+1} OUTSIDE tolerance! Error: {error:+.4f} Torr")
+                else:
                     log_line += f" | Dev {ch+1}: {'OUT OF RANGE' if sp > fs else 'READ FAILED'}"
 
             app.log_message(log_line)
-            app.after(0, app.update_error_plot) # Update plot from main thread
+            app.after(0, app.update_error_plot)
 
         if app.is_calibrating:
-            app.log_message(f"\n--- Data Logging Complete in {time.time() - run_start_time:.1f} seconds. Saving data... ---")
-            pd.DataFrame(app.data_storage).to_csv("calibration_results.csv", index=False)
-            app.log_message("Data saved to 'calibration_results.csv'.")
+            app.log_message("\n--- Data Logging Complete. Analyzing results for certificate generation... ---")
+            
+            output_dir = "Analysis"
+            os.makedirs(output_dir, exist_ok=True)
+            csv_output_path = os.path.join(output_dir, "calibration_results.csv")
+            
+            cal_results_df = pd.DataFrame(app.data_storage)
+            cal_results_df.to_csv(csv_output_path, index=False)
+            app.log_message(f"Data saved to '{csv_output_path}'.")
             app._save_learned_data()
+
+            tech_id = app.tech_id_var.get()
+
+            for dut in app.active_duts:
+                app.log_message(f"Checking pass status for DUT {dut['channel']+1}...")
+                
+                std_points = np.array([s for s, d in zip(cal_results_df['Standard_Pressure_Torr'], cal_results_df[f'Device_{dut["channel"]+1}_Pressure_Torr']) if not np.isnan(d) and not np.isnan(s)])
+                dut_points = np.array([d for s, d in zip(cal_results_df['Standard_Pressure_Torr'], cal_results_df[f'Device_{dut["channel"]+1}_Pressure_Torr']) if not np.isnan(d) and not np.isnan(s)])
+                
+                is_pass = False
+                if len(dut_points) > 3:
+                    errors = np.abs(dut_points - std_points)
+                    max_error = np.max(errors)
+                    tolerance = dut['fs'] * 0.005
+                    if max_error <= tolerance:
+                        is_pass = True
+
+                if is_pass:
+                    app.log_message(f"✅ DUT {dut['channel']+1} PASSED. Generating certificate for WIP {dut['wip']}...")
+                    cert_path = generate_certificate(dut, cal_results_df, tech_id, app.log_queue)
+                    if cert_path:
+                        app.generated_certs.append(cert_path)
+                else:
+                    app.log_message(f"❌ DUT {dut['channel']+1} did not pass tolerance checks. No certificate will be generated.")
 
     except Exception as e:
         app.log_message(f"FATAL ERROR during logging: {e}")
@@ -176,9 +210,13 @@ def run_calibration(app):
         app.is_calibrating = False
         if app.state_controller: app.state_controller.close_valves()
         app.after(10, app.analyze_and_suggest_tuning)
-        app.after(10, lambda: [
-            app.start_button.config(state=tk.NORMAL),
-            app.manual_cal_button.config(state=tk.NORMAL),
-            app.e_stop_button.config(state=tk.DISABLED),
+
+        def enable_buttons():
+            app.start_button.config(state=tk.NORMAL)
+            app.manual_cal_button.config(state=tk.NORMAL)
+            app.e_stop_button.config(state=tk.DISABLED)
             app.set_pressure_button.config(state=tk.NORMAL)
-        ])
+            if app.generated_certs:
+                app.upload_to_asana_button.config(state=tk.NORMAL)
+        
+        app.after(10, enable_buttons)

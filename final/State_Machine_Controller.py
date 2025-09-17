@@ -1,15 +1,15 @@
+# final/State_Machine_Controller.py
 # -*- coding: utf-8 -*-
 # ==============================================================================
 # File:         State_Machine_Controller.py
 # Author:       Terrance Holmes
-# Date:         September 5, 2025
+# Date:         September 11, 2025
 # Description:  This module contains the StateMachinePressureController class.
-#               It manages the dual-valve pressure control system using a
-#               hybrid event-driven and adaptive polling architecture.
 #
-# Version Update (E-Stop Logic):
-#   - E-Stop event no longer stops the read-only polling loop.
-#   - This allows the GUI to continue displaying live data after an E-stop.
+# Version Update (Logic Tuning & Manual Override):
+#   - Added a manual_override_active event to pause adaptive logic.
+#   - Relaxed the outlet valve clamp for high-vacuum setpoints (>90% FS).
+#   - "Inlet near closed" logic now more aggressively opens the outlet.
 # ==============================================================================
 
 import serial
@@ -25,67 +25,66 @@ import statistics
 class StateMachinePressureController:
     """
     Manages a dual-valve pressure system using a state machine and adaptive logic.
-
-    This controller handles the low-level communication with both the inlet
-    and outlet valve controllers. It runs background threads to continuously
-    poll for pressure and valve positions, and adaptively adjusts the outlet
-    valve to maintain stability based on system behavior.
     """
     def __init__(self, inlet_port, outlet_port, full_scale_pressure, log_queue, e_stop_event):
         """
-        Initializes the pressure controller.
-
-        Args:
-            inlet_port (str): COM port for the inlet valve controller.
-            outlet_port (str): COM port for the outlet valve controller.
-            full_scale_pressure (float): The full-scale pressure of the system in Torr.
-            log_queue (queue.Queue): A queue for sending log messages to the GUI.
-            e_stop_event (threading.Event): A global event to signal an E-Stop condition.
+        Initializes the pressure controller and configures hardware FS range.
         """
         self.ser_inlet, self.ser_outlet = None, None
         self.is_connected = False
         self._stop_event = threading.Event()
-        self.e_stop_event = e_stop_event # NEW: E-stop event from main app
+        self.e_stop_event = e_stop_event
         self._polling_thread = None
         self._adaptive_outlet_thread = None
         self.log_queue = log_queue
 
-        # Threading locks to prevent race conditions when writing to serial ports.
         self.inlet_lock = threading.Lock()
         self.outlet_lock = threading.Lock()
 
-        # An event to signal that all valve movements should be paused.
         self.hold_all_valves = threading.Event()
+        self.manual_override_active = threading.Event() # <-- NEW for manual cooldown
 
         try:
-            # Establish connections to both valve controllers.
             self.ser_inlet = serial.Serial(port=inlet_port, baudrate=9600, timeout=1, write_timeout=1)
             self.ser_outlet = serial.Serial(port=outlet_port, baudrate=9600, timeout=1, write_timeout=1)
 
-            # System parameters and state variables.
+            fs_command_map = {
+                0.1: 0, 1.0: 3, 10.0: 6, 100.0: 9, 1000.0: 12
+            }
+            command_code = fs_command_map.get(full_scale_pressure)
+            if command_code is not None:
+                fs_command = f"E{command_code}"
+                self.log_queue.put(f">> Configuring controllers for {full_scale_pressure} Torr FS (CMD: {fs_command}).")
+                self._write_to_inlet(fs_command)
+                self._write_to_outlet(fs_command)
+                time.sleep(0.5)
+            else:
+                self.log_queue.put(f"⚠️ WARNING: No direct hardware command for {full_scale_pressure} Torr FS. Controller displays may not match.")
+
             self.full_scale_pressure = full_scale_pressure
             self.system_setpoint = 0.0
             self.previous_setpoint = 0.0
             self.pressure_history = collections.deque(maxlen=10)
             self.is_connected = True
             self.current_pressure, self.inlet_valve_pos, self.outlet_valve_pos = None, 0.0, 0.0
-            self.inlet_pos_history = collections.deque(maxlen=5)
-            self.hold_outlet_valve = False # Flag to temporarily freeze the outlet valve during logging.
-            self.last_log_reason = "" # To avoid spamming logs with the same message.
+            self.inlet_pos_history = collections.deque(maxlen=10)
+            self.hold_outlet_valve = False
+            self.last_log_reason = ""
 
-            # Flags for adaptive logic states.
             self.max_slope_hold = False
             self.oscillation_cooldown = False
             self.oscillation_counter = 0
             self.inlet_high_blind_active = False
             self.inlet_high_blind_start_time = 0
+            
+            self.inlet_near_closed_counter = 0
+            self.inlet_oscillation_counter = 0
 
         except serial.SerialException as e:
             self.close()
             raise ConnectionError(f"Failed to open controller ports: {e}")
 
     def _write_to_inlet(self, command):
-        """Thread-safe method to write a command to the inlet controller."""
         with self.inlet_lock:
             if not self.is_connected or not self.ser_inlet: return
             try:
@@ -96,7 +95,6 @@ class StateMachinePressureController:
                 self.log_queue.put("ERROR: Write timeout on Inlet Controller!")
 
     def _query_inlet(self, command):
-        """Thread-safe method to send a command and read the response from the inlet controller."""
         with self.inlet_lock:
             if not self.is_connected or not self.ser_inlet: return None
             try:
@@ -110,7 +108,6 @@ class StateMachinePressureController:
                 return None
 
     def _write_to_outlet(self, command):
-        """Thread-safe method to write a command to the outlet controller."""
         with self.outlet_lock:
             if not self.is_connected or not self.ser_outlet: return
             try:
@@ -121,7 +118,6 @@ class StateMachinePressureController:
                 self.log_queue.put("ERROR: Write timeout on Outlet Controller!")
 
     def _query_outlet(self, command):
-        """Thread-safe method to send a command and read the response from the outlet controller."""
         with self.outlet_lock:
             if not self.is_connected or not self.ser_outlet: return None
             try:
@@ -135,20 +131,16 @@ class StateMachinePressureController:
                 return None
 
     def start(self):
-        """Starts the background polling and adaptive logic threads."""
         if self._polling_thread is None:
             self._stop_event.clear()
-            # Thread for continuously reading pressure and valve positions.
             self._polling_thread = threading.Thread(target=self._run_polling_loop, daemon=True)
             self._polling_thread.start()
             self.log_queue.put(">> Controller polling started.")
-            # Thread for the adaptive control logic for the outlet valve.
             self._adaptive_outlet_thread = threading.Thread(target=self._run_adaptive_outlet_loop, daemon=True)
             self._adaptive_outlet_thread.start()
             self.log_queue.put(">> Adaptive outlet helper started.")
 
     def stop(self):
-        """Stops the background threads and closes valves."""
         self._stop_event.set()
         if self._polling_thread is not None:
             self._polling_thread.join(timeout=2)
@@ -159,38 +151,30 @@ class StateMachinePressureController:
         self._adaptive_outlet_thread = None
 
     def _run_polling_loop(self):
-        """
-        Background thread function to poll pressure and valve positions.
-        This loop runs continuously to keep the controller's state variables updated.
-        """
-        while not self._stop_event.is_set(): # E-Stop does NOT stop polling
+        while not self._stop_event.is_set():
             pressure = self.get_pressure()
             if pressure is not None:
                 self.current_pressure = pressure
                 self.pressure_history.append(self.current_pressure)
             self.get_valve_positions()
-            time.sleep(0.2) # Poll at 5 Hz.
+            time.sleep(0.2)
 
     def _run_adaptive_outlet_loop(self):
-        """
-        Background thread for the adaptive outlet valve control logic.
-        This complex logic analyzes system stability, inlet valve position, and
-        pressure error to make intelligent adjustments to the outlet valve,
-        improving stability and settling time.
-        """
         while not self._stop_event.is_set() and not self.e_stop_event.is_set():
-            # Pause if manual hold is active.
+            # --- NEW: Check for manual override cooldown ---
+            if self.manual_override_active.is_set():
+                time.sleep(1.0)
+                continue
+            
             if self.hold_all_valves.is_set() or self.hold_outlet_valve:
                 time.sleep(1.0)
                 continue
 
-            # Wait until enough data is collected.
             if len(self.pressure_history) < self.pressure_history.maxlen or self.system_setpoint <= 0 or self.current_pressure is None or self.inlet_valve_pos is None:
                 time.sleep(1.0)
                 continue
 
             try:
-                # Deactivate blind mode after 10 seconds.
                 if self.inlet_high_blind_active and (time.time() - self.inlet_high_blind_start_time) > 10.0:
                     self.log_queue.put(">> Adaptive logic blind deactivated.")
                     self.inlet_high_blind_active = False
@@ -204,34 +188,47 @@ class StateMachinePressureController:
                 mean_pressure = statistics.mean(self.pressure_history)
                 is_near_setpoint = abs(mean_pressure - self.system_setpoint) < (self.full_scale_pressure * 0.02)
 
-                # --- Oscillation Detection Logic ---
                 if is_near_setpoint and not self.inlet_high_blind_active:
                     pressure_oscillation_threshold = (self.system_setpoint * 0.003) + (self.full_scale_pressure * 0.0008)
                     pressure_std_dev = statistics.stdev(self.pressure_history)
                     if pressure_std_dev > pressure_oscillation_threshold:
-                        self.oscillation_counter = min(self.oscillation_counter + 1, 5) # Increment and cap the counter
-                        self.oscillation_cooldown = True # Enter cooldown if any oscillation is detected
+                        self.oscillation_counter = min(self.oscillation_counter + 1, 5)
+                        self.oscillation_cooldown = True
                     else:
-                        self.oscillation_counter = max(self.oscillation_counter - 1, 0) # Decrement the counter if stable
+                        self.oscillation_counter = max(self.oscillation_counter - 1, 0)
                         if self.oscillation_counter == 0:
-                            self.oscillation_cooldown = False # End cooldown only when counter is zero
+                            self.oscillation_cooldown = False
+                    
+                    if len(self.inlet_pos_history) == self.inlet_pos_history.maxlen:
+                        inlet_std_dev = statistics.stdev(self.inlet_pos_history)
+                        if inlet_std_dev > 2.0:
+                            self.inlet_oscillation_counter = min(self.inlet_oscillation_counter + 1, 5)
+                        else:
+                            self.inlet_oscillation_counter = max(self.inlet_oscillation_counter - 1, 0)
                 else:
                     self.oscillation_counter = 0
                     self.oscillation_cooldown = False
+                    self.inlet_oscillation_counter = 0
 
-                # --- Adaptive Action Logic ---
-                # Correct for oscillations by slightly closing the outlet.
+                if inlet_valve_pos > 99.5:
+                    self.inlet_near_closed_counter += 1
+                else:
+                    self.inlet_near_closed_counter = 0
+
                 if self.oscillation_counter >= 2:
-                    # A large error during oscillation may require a bigger correction.
                     if error > (self.full_scale_pressure * 0.05):
                         new_outlet_pos = current_outlet_pos - 2.0
                         log_reason = f"EMERGENCY DESCENT (Err: {error:+.1f})"
                     else:
                         new_outlet_pos = current_outlet_pos - 0.2
                         log_reason = f"Pressure oscillating (StdDev: {statistics.stdev(self.pressure_history):.3f} Torr)"
-                    self.oscillation_counter = 0 # Reset counter after taking action
+                    self.oscillation_counter = 0
+                
+                elif self.inlet_oscillation_counter >= 3:
+                    new_outlet_pos = current_outlet_pos - 0.2
+                    log_reason = f"Inlet valve oscillating (StdDev: {statistics.stdev(self.inlet_pos_history):.2f}%)"
+                    self.inlet_oscillation_counter = 0
 
-                # If inlet is nearly closed but pressure is high, open outlet to release pressure.
                 elif inlet_valve_pos < 1.0 and error > 0.1:
                     new_outlet_pos = current_outlet_pos + 0.2
                     log_reason = f"Leak Up Detected (Inlet at {inlet_valve_pos:.1f}%)"
@@ -240,13 +237,10 @@ class StateMachinePressureController:
                     step_size = 0.5
                     is_pressure_stable = statistics.stdev(self.pressure_history) < (0.005 + (self.system_setpoint * 0.001))
 
-                    # If pressure is stable but high, open the outlet valve slightly.
                     if is_pressure_stable and error > 0.2 and not self.inlet_high_blind_active and not self.oscillation_cooldown:
                         new_outlet_pos = current_outlet_pos + step_size
                         log_reason = f"Stuck high (Err: {error:+.2f} Torr)"
 
-                    # Logic from Version 89: Inlet valve is working too hard (too open),
-                    # so close the outlet slightly to reduce the load.
                     elif inlet_valve_pos < 75.0 and not self.oscillation_cooldown and not self.inlet_high_blind_active:
                         inlet_trend = inlet_valve_pos - self.inlet_pos_history[-2] if len(self.inlet_pos_history) > 1 else 0
                         if inlet_trend < -0.1:
@@ -254,14 +248,19 @@ class StateMachinePressureController:
                             log_reason = "Max Slope Detected (Opening)"
                         else:
                             new_outlet_pos = current_outlet_pos - step_size
-                            percent_open = 100.0 - inlet_valve_pos # Inlet is inverse
+                            percent_open = 100.0 - inlet_valve_pos
                             log_reason = f"Inlet valve overworked ({percent_open:.1f}% open)"
-
-                    # If the inlet valve is almost closed, open the outlet to give it more control range.
-                    elif inlet_valve_pos > 98.0 and self.system_setpoint > 0 and self.previous_setpoint != 0:
-                        new_outlet_pos = current_outlet_pos + step_size
-                        percent_open = 100.0 - inlet_valve_pos
-                        log_reason = f"Inlet valve near closed ({percent_open:.1f}% open)"
+                    
+                    elif self.inlet_near_closed_counter >= 5 and self.system_setpoint > 0 and self.previous_setpoint != 0:
+                        # --- MODIFIED: More aggressive action when inlet is closed ---
+                        if error > (self.full_scale_pressure * 0.01):
+                            new_outlet_pos = current_outlet_pos + (step_size * 2) # Double the step
+                            log_reason = f"Inlet closed, pressure high. Forcing outlet open."
+                        else:
+                             new_outlet_pos = current_outlet_pos + step_size
+                             percent_open = 100.0 - inlet_valve_pos
+                             log_reason = f"Inlet valve near closed ({percent_open:.1f}% open)"
+                        self.inlet_near_closed_counter = 0
 
                     if self.max_slope_hold:
                         log_reason = "Max Slope Hold"
@@ -275,20 +274,26 @@ class StateMachinePressureController:
                     time.sleep(3.0)
                     continue
 
-                # --- Dynamic Clamping Logic ---
-                # Clamp the outlet position to a safe range that varies with the setpoint.
-                min_clamp = 22.0
-                setpoint_percent = (self.system_setpoint / self.full_scale_pressure) * 100.0
-                if setpoint_percent >= 90.0: max_clamp = 26.0
-                elif setpoint_percent > 40.0: max_clamp = 30.0
-                else: max_clamp = 35.0
+                setpoint_percent = (self.system_setpoint / self.full_scale_pressure) * 100.0 if self.full_scale_pressure > 0 else 0
+
+                if setpoint_percent <= 10.0:
+                    min_clamp = 5.0
+                    max_clamp = 85.0
+                elif setpoint_percent <= 40.0:
+                    min_clamp = 15.0
+                    max_clamp = 50.0
+                elif setpoint_percent < 90.0:
+                    min_clamp = 22.0
+                    max_clamp = 35.0
+                else: # --- MODIFIED: Relaxed clamp for high vacuum ---
+                    min_clamp = 22.0
+                    max_clamp = 40.0 # Was 26.0
 
                 clamped_pos = max(min_clamp, min(max_clamp, new_outlet_pos))
 
-                # Apply the change if it's significant.
                 if abs(clamped_pos - current_outlet_pos) > 0.1:
                     if log_reason != self.last_log_reason:
-                        self.log_queue.put(f"ADAPT -> Outlet to {clamped_pos:.1f}%. Reason: {log_reason}")
+                        self.log_queue.put(f"ADAPT -> Outlet to {clamped_pos:.1f}%. Reason: {log_reason} [Clamp: {min_clamp}-{max_clamp}%]")
                         self.last_log_reason = log_reason
                     self._write_to_outlet(f"S1 {clamped_pos:.2f}")
                     self._write_to_outlet("D1")
@@ -296,38 +301,27 @@ class StateMachinePressureController:
                     self.last_log_reason = ""
 
             except (statistics.StatisticsError, AttributeError, IndexError):
-                # Ignore errors if data history is not ready.
                 pass
 
-            time.sleep(3.0) # Run adaptive logic every 3 seconds.
+            time.sleep(3.0)
 
     def set_pressure(self, pressure, predicted_outlet_pos=None):
-        """
-        Sets a new target pressure for the system.
-
-        Args:
-            pressure (float): The target pressure in Torr.
-            predicted_outlet_pos (float, optional): A predicted outlet position
-                from the learning model to speed up settling. Defaults to None.
-        """
-        if self.e_stop_event.is_set(): return # E-Stop check
+        if self.e_stop_event.is_set(): return
         
         self.hold_all_valves.clear()
         self.log_queue.put(f">> New system setpoint: {pressure:.3f} Torr")
         self.previous_setpoint = self.system_setpoint
         self.system_setpoint = pressure
-        # Reset state variables for the new setpoint.
         self.pressure_history.clear()
         self.last_log_reason = ""
         self.max_slope_hold = False
         self.oscillation_cooldown = False
 
         if pressure == 0:
-            # First, command the inlet to close and wait for confirmation.
             self._write_to_inlet("C")
             self.log_queue.put(">> PUMP TO ZERO MODE: Waiting for inlet valve to close...")
             
-            timeout = time.time() + 15 # 15 second timeout
+            timeout = time.time() + 15
             inlet_closed = False
             while time.time() < timeout:
                 if self.inlet_valve_pos is not None and self.inlet_valve_pos > 99.9:
@@ -340,13 +334,10 @@ class StateMachinePressureController:
                 self.log_queue.put("!! TIMEOUT waiting for inlet valve to close. Aborting pump-down.")
                 return
 
-            # --- UPDATED RAMPING LOGIC ---
             current_p = self.get_pressure()
-            # Trigger ramp if pressure is above 75% of the standard's FS.
             if current_p is not None and current_p > (self.full_scale_pressure * 0.75):
                 self.log_queue.put(f"!! High pressure ({current_p:.2f} Torr) detected. Ramping outlet valve.")
                 
-                # Ramp from 0% to 20% over 10 seconds (2.0% per second)
                 for i in range(10):
                     if self.e_stop_event.is_set():
                         self.log_queue.put("E-STOP triggered. Aborting ramp.")
@@ -357,18 +348,15 @@ class StateMachinePressureController:
                     self.log_queue.put(f"   Ramping outlet... {pos:.1f}%")
                     time.sleep(1.0)
                 
-                # If ramp completed, proceed to hold phase
                 if not self.e_stop_event.is_set():
                     self.log_queue.put("Ramp complete. Holding at 20% for 5 seconds.")
                     
-                    # Hold at 20% for 5 seconds, checking for E-Stop each second.
                     for _ in range(5):
                         if self.e_stop_event.is_set():
                             self.log_queue.put("E-STOP triggered. Aborting hold.")
                             break
                         time.sleep(1.0)
 
-                    # Second ramp from 20% to 25% over 10 seconds (0.5% per second)
                     if not self.e_stop_event.is_set():
                         self.log_queue.put("First hold complete. Ramping to 25%...")
                         for i in range(10):
@@ -381,7 +369,6 @@ class StateMachinePressureController:
                             self.log_queue.put(f"   Ramping outlet... {pos:.1f}%")
                             time.sleep(1.0)
 
-                    # Final hold before opening fully
                     if not self.e_stop_event.is_set():
                         self.log_queue.put("Second ramp complete. Holding for 1 second.")
                         time.sleep(1.0)
@@ -389,25 +376,23 @@ class StateMachinePressureController:
             else:
                 self.log_queue.put(">> PUMP TO ZERO MODE: Inlet closed, Outlet fully open.")
             
-            # Final command to open fully, only if not E-stopped
             if not self.e_stop_event.is_set():
                 self._write_to_outlet("S1 100.0")
                 self._write_to_outlet("D1")
             
         else:
             outlet_was_moved = False
-            # Use the learned prediction if available.
             if predicted_outlet_pos is not None:
                 self.log_queue.put(f">> Applying predicted outlet position: {predicted_outlet_pos:.2f}%.")
                 self._write_to_outlet(f"S1 {predicted_outlet_pos:.2f}")
                 self._write_to_outlet("D1")
                 outlet_was_moved = True
-            # If moving from zero, set a dynamic initial position.
             elif self.previous_setpoint == 0:
                 setpoint_percent = (pressure / self.full_scale_pressure) * 100.0
                 if setpoint_percent >= 90.0: initial_outlet_pos = 24.0
                 elif setpoint_percent > 40.0: initial_outlet_pos = 28.0
-                else: initial_outlet_pos = 35.0
+                elif setpoint_percent > 10.0: initial_outlet_pos = 40.0
+                else: initial_outlet_pos = 70.0
                 self.log_queue.put(f">> Moving from zero, dynamic initial outlet: {initial_outlet_pos}%.")
                 self._write_to_outlet(f"S1 {initial_outlet_pos:.2f}")
                 self._write_to_outlet("D1")
@@ -415,13 +400,11 @@ class StateMachinePressureController:
             else:
                 self.log_queue.put(f">> Holding current outlet position for new setpoint.")
 
-            # Temporarily disable adaptive logic after a large move.
             if self.previous_setpoint == 0:
                 self.inlet_high_blind_active = True
                 self.inlet_high_blind_start_time = time.time()
                 self.log_queue.put(">> Adaptive logic blinded for 10s after move from zero.")
 
-            # Wait for the outlet valve to physically move before proceeding.
             if outlet_was_moved:
                 if self.e_stop_event.is_set(): return
                 self.log_queue.put(">> Waiting for outlet valve to move...")
@@ -430,28 +413,23 @@ class StateMachinePressureController:
                 self.get_valve_positions()
                 time.sleep(0.2)
 
-            # Set the primary (inlet) controller to the new pressure setpoint.
             if not self.e_stop_event.is_set():
                 inlet_pressure_sp_percent = (pressure / self.full_scale_pressure) * 100.0
                 self._write_to_inlet(f"S1 {inlet_pressure_sp_percent:.2f}")
                 self._write_to_inlet("D1")
 
     def get_pressure(self):
-        """Queries the inlet controller for the current system pressure."""
-        response = self._query_inlet("R5") # R5 reads the process variable.
+        response = self._query_inlet("R5")
         if response:
             try:
                 match = re.search(r'[+-]?\d+\.?\d*', response)
                 if match:
-                    # Convert percentage response to pressure in Torr.
                     return (float(match.group()) / 100) * self.full_scale_pressure
             except (ValueError, IndexError): return None
         return None
 
     def get_valve_positions(self):
-        """Queries both controllers for their current valve positions."""
         try:
-            # R6 reads the control output (valve position).
             inlet_res = self._query_inlet("R6")
             outlet_res = self._query_outlet("R6")
 
@@ -470,7 +448,6 @@ class StateMachinePressureController:
             pass
 
     def close_valves(self):
-        """Commands both valves to close and holds them."""
         self.hold_all_valves.set()
         self.log_queue.put(">> All valves commanded to close.")
         self._write_to_inlet("C")
@@ -478,11 +455,8 @@ class StateMachinePressureController:
         time.sleep(0.5)
 
     def close(self):
-        """Shuts down the controller, stops threads, and closes serial ports."""
         if self.is_connected:
             self.stop()
             if self.ser_inlet and self.ser_inlet.is_open: self.ser_inlet.close()
             if self.ser_outlet and self.ser_outlet.is_open: self.ser_outlet.close()
             self.is_connected = False
-
-
