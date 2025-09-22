@@ -1,0 +1,81 @@
+================================================================================ RS-232 COMMAND SUMMARY (Direct Commands)
+Command | Function
+
+K0        | Disable battery backup
+K1        | Select valve to OPEN upon power fail
+K2        | Select valve to CLOSE upon power fail
+================================================================================ RS-232 REQUEST SUMMARY (Queries for Information)
+Request | Information Requested | Response Message
+
+R0        | Analog set point value               | S0 value (% of F.S.)
+R1        | Set point A value                    | S1 value (% of F.S.)
+R2        | Set point B value                    | S2 value (% of F.S.)
+R3        | Set point C value                    | S3 value (% of F.S.)
+R4        | Set point D value                    | S4 value (% of F.S.)
+R5        | System pressure value                | P  value (% of F.S.)
+R6        | Valve Position                       | V  value (% open)
+R7        | Alternate system status              | MXYZ (See Note 1)
+R10       | Set point E value                    | S5 value (% of F.S.)
+R11       | Low threshold process limit #1       | P1 value (% of F.S.)
+R12       | High threshold process limit #1      | P2 value (% of F.S.)
+R13       | Low threshold process limit #2       | P3 value (% of F.S.)
+R14       | High threshold process limit #2      | P4 value (% of F.S.)
+R15       | Softstart rate for set point A       | I1 value (% of full speed)
+R16       | Softstart rate for set point B       | I2 value (% of full speed)
+R17       | Softstart rate for set point C       | I3 value (% of full speed)
+R18       | Softstart rate for set point D       | I4 value (% of full speed)
+R19       | Softstart rate for set point E       | I5 value (% of full speed)
+R20       | Softstart rate for analog set point  | I6 value (% of full speed)
+R21       | Softstart rate for valve open        | I7 value (% of full speed)
+R22       | Softstart rate for valve close       | I8 value (% of full speed)
+R23       | Valve type                           | J type (See Note 2)
+R24       | Analog set point range               | A range (0=5V, 1=10V)
+R25       | Analog set point type                | T0 type (0=position, 1=pressure)
+R26       | Set point A type                     | T1 type (0=position, 1=pressure)
+R27       | Set point B type                     | T2 type (0=position, 1=pressure)
+R28       | Set point C type                     | T3 type (0=position, 1=pressure)
+R29       | Set point D type                     | T4 type (0=position, 1=pressure)
+R30       | Set point E type                     | T5 type (0=position, 1=pressure)
+R31       | Position indicator range output      | B value (0=5V, 1=10V)
+R32       | Direct/reverse control               | N value (0=direct, 1=reverse)
+R33       | Sensor range                         | E value (See Note 3)
+R34       | Pressure units                       | F value (See Note 4)
+R35       | Sensor voltage range                 | G value (0=1V, 1=5V, 2=10V)
+R36       | Sensor type                          | U value (0=Absolute, 1=Differential)
+R37       | System status                        | MXYZ (See Note 5)
+R38       | Software version                     | H version number
+R39       | Status of battery backup             | BT value (BT=Bad, BT1=Good, BT2=Not installed)
+R40       | Valve response to power fail         | K value (K0=Disabled, K1=Opens, K2=Closes)
+R41       | Lead A value                         | X1 value (seconds)
+R42       | Lead B value                         | X2 value (seconds)
+R43       | Lead C value                         | X3 value (seconds)
+R44       | Lead D value                         | X4 value (seconds)
+R45       | Lead E value                         | X5 value (seconds)
+R46       | Gain A value                         | M1 value (% gain)
+R47       | Gain B value                         | M2 value (% gain)
+R48       | Gain C value                         | M3 value (% gain)
+R49       | Gain D value                         | M4 value (% gain)
+R50       | Gain E value                         | M5 value (% gain)
+R51       | Type of control                      | V value (0=Self-Tuning, 1=PID)
+R52       | Checksum error                       | CS value (0=OK, 1=Error)
+NOTES
+
+Note 1 (R7 - MXYZ):
+X: 0=Analog, 1=A, 2=B, 3=C, 4=D, 5=E
+Y: 0=Controlling, 2=Valve Open, 4=Valve Close
+Z: 0=Pressure < 10% F.S., 1=Pressure > 10% F.S.
+
+Note 2 (R23 - J type):
+1 = Std 253, 2 = Fast 253, 3 = 653
+
+Note 3 (R33 - E value):
+00=0.1, 01=0.2, 02=0.5, 03=1, 04=2, 05=5, 06=10, 07=50, 08=100,
+09=500, 10=1000, 11=5000, 12=10000
+
+Note 4 (R34 - F value):
+00=Torr, 01=mTorr, 02=mbar, 03=µbar, 04=kPa, 05=Pa, 06=cmH2O, 07=inH2O
+
+Note 5 (R37 - MXYZ):
+X: 0=Local, 1=Remote
+Y: 0=Not Learning, 1=Learning, 2=Learning Valve System
+Z: 0=Open, 1=Close, 2=Stop, 3=SP A, 4=SP B, 5=SP C, 6=SP D, 7=SP E, 8=Analog SP
