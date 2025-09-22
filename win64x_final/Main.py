@@ -30,7 +30,6 @@ from Turbo_Controller import TurboController
 from Cert_Generator import generate_certificate
 from Asana_Imports.asana_logic import upload_cert_to_asana
 from Asana_Imports.asana_api_client import AsanaClient
-from MultiplexerController import MultiplexerController
 
 
 class CalibrationGUI(tk.Tk):
@@ -48,7 +47,6 @@ class CalibrationGUI(tk.Tk):
         self.state_controller = None
         self.daq = None
         self.turbo_controller = None
-        self.multiplexer = None
         self.is_connected = False
         self.is_calibrating = False
         self.is_in_manual_mode = False
@@ -469,15 +467,15 @@ class CalibrationGUI(tk.Tk):
         self.std_fs_var.set(f"{standard_fs} Torr")
         self.standard_fs_value = standard_fs
         
-        if self.multiplexer and self.is_connected:
-            self.multiplexer.select_channel(channel)
+        if self.daq and self.is_connected:
+            self.daq.select_channel(channel)
             
             if standard_fs <= 1.0:
-                self.multiplexer.set_range(0.01)
+                self.daq.set_range(0.01)
             elif standard_fs <= 100.0:
-                self.multiplexer.set_range(0.1)
+                self.daq.set_range(0.1)
             else:
-                self.multiplexer.set_range(1)
+                self.daq.set_range(1)
         else:
             pass
 
@@ -497,7 +495,6 @@ class CalibrationGUI(tk.Tk):
         if self.state_controller: self.state_controller.close()
         if self.daq: self.daq.close()
         if self.turbo_controller: self.turbo_controller.stop()
-        if self.multiplexer: self.multiplexer.cleanup()
 
         self.is_connected = False
         self.connect_button.config(text="Connect", state=tk.NORMAL)
@@ -531,9 +528,6 @@ class CalibrationGUI(tk.Tk):
             self.turbo_controller = TurboController(turbo_port, self.log_queue)
             self.log_message(f"Connected to Turbo on {turbo_port}.")
 
-            channel_pins = {1: 10, 2: 26, 3: 16}
-            range_pins = {'x0.1': 21, 'x0.01': 24}
-            self.multiplexer = MultiplexerController(channel_pins, range_pins, self.log_queue)
             self.on_standard_change()
 
             self.state_controller.start()
@@ -1632,7 +1626,6 @@ class CalibrationGUI(tk.Tk):
         if self.state_controller: self.state_controller.close()
         if self.daq: self.daq.close()
         if self.turbo_controller: self.turbo_controller.stop()
-        if self.multiplexer: self.multiplexer.cleanup()
 
         self.quit()
         self.destroy()

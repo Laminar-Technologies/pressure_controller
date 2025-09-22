@@ -73,6 +73,27 @@ class DAQController:
             
             return np.mean(history)
 
+    def select_channel(self, channel):
+        """Sends a command to the DAQ server to select a multiplexer channel."""
+        if self.is_connected:
+            try:
+                command = f"CH:{channel}\n"
+                self.sock.sendall(command.encode('utf-8'))
+            except socket.error as e:
+                print(f"Error sending channel select command: {e}")
+                self.is_connected = False
+
+    def set_range(self, multiplier):
+        """Sends a command to the DAQ server to set the range."""
+        if self.is_connected:
+            try:
+                command = f"RNG:{multiplier}\n"
+                self.sock.sendall(command.encode('utf-8'))
+            except socket.error as e:
+                print(f"Error sending set range command: {e}")
+                self.is_connected = False
+
+
     def close(self):
         """
         Signals the background thread to stop and closes the socket connection.
