@@ -1,0 +1,53 @@
+{
+    "inlet_com": "/dev/ttyUSB0",
+    "outlet_com": "/dev/ttyUSB1",
+    "turbo_com": "/dev/ttyUSB2",
+    "std_fs": "0.1 Torr",
+    "tech_id": "TH",
+    "duts": [
+        {
+            "enabled": false,
+            "fs": "0.1",
+            "model": "",
+            "serial": "",
+            "wip": "",
+            "customer": "Applied Materials",
+            "item_number": "1350-00856"
+        },
+        {
+            "enabled": false,
+            "fs": "0.1",
+            "model": "",
+            "serial": "",
+            "wip": "",
+            "customer": "Applied Materials",
+            "item_number": "1350-00856"
+        },
+        {
+            "enabled": false,
+            "fs": "0.1",
+            "model": "",
+            "serial": "",
+            "wip": "",
+            "customer": "Applied Materials",
+            "item_number": "1350-00856"
+        },
+        {
+            "enabled": false,
+            "fs": "0.1",
+            "model": "",
+            "serial": "",
+            "wip": "",
+            "customer": "Applied Materials",
+            "item_number": "1350-00856"
+        }
+    ],
+    "service_types": [
+        "Level 1 Repair"
+    ],
+    "last_service_type": "Level 1 Repair",
+    "std_ids": [
+        "PVS 100"
+    ],
+    "last_std_id": "PVS 100"
+}

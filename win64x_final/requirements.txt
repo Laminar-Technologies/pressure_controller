@@ -1,0 +1,10 @@
+numpy
+pandas
+pyserial
+matplotlib
+Pillow
+openpyxl
+requests
+RPi.GPIO
+spidev
+pi-ads1256
