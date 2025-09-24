@@ -10,8 +10,6 @@
 #   - Added a manual_override_active event to pause adaptive logic.
 #   - Relaxed the outlet valve clamp for high-vacuum setpoints (>90% FS).
 #   - "Inlet near closed" logic now more aggressively opens the outlet.
-# Version Update (Raspberry Pi Performance Fix):
-#   - Replaced readline() with read_until('\r') for robust communication with MKS controllers.
 # ==============================================================================
 
 import serial
@@ -86,6 +84,21 @@ class StateMachinePressureController:
             self.close()
             raise ConnectionError(f"Failed to open controller ports: {e}")
 
+    def update_full_scale_pressure(self, new_fs):
+        self.full_scale_pressure = new_fs
+        fs_command_map = {
+            0.1: 0, 1.0: 3, 10.0: 6, 100.0: 9, 1000.0: 12
+        }
+        command_code = fs_command_map.get(new_fs)
+        if command_code is not None:
+            fs_command = f"E{command_code}"
+            self.log_queue.put(f">> Re-configuring controllers for {new_fs} Torr FS (CMD: {fs_command}).")
+            self._write_to_inlet(fs_command)
+            self._write_to_outlet(fs_command)
+        else:
+            self.log_queue.put(f"⚠️ WARNING: No direct hardware command for {new_fs} Torr FS. Controller displays may not match.")
+
+
     def _write_to_inlet(self, command):
         with self.inlet_lock:
             if not self.is_connected or not self.ser_inlet: return
@@ -100,12 +113,10 @@ class StateMachinePressureController:
         with self.inlet_lock:
             if not self.is_connected or not self.ser_inlet: return None
             try:
-                self.ser_inlet.reset_input_buffer()
                 full_command = (command + '\r').encode('ascii')
                 self.ser_inlet.write(full_command)
                 self.ser_inlet.flush()
-                # --- MODIFICATION: Use read_until for MKS controllers ---
-                response_bytes = self.ser_inlet.read_until(b'\r')
+                response_bytes = self.ser_inlet.readline()
                 return response_bytes.decode('ascii', errors='ignore').strip()
             except serial.SerialTimeoutException:
                 self.log_queue.put("ERROR: Write timeout on Inlet Controller query!")
@@ -125,12 +136,10 @@ class StateMachinePressureController:
         with self.outlet_lock:
             if not self.is_connected or not self.ser_outlet: return None
             try:
-                self.ser_outlet.reset_input_buffer()
                 full_command = (command + '\r').encode('ascii')
                 self.ser_outlet.write(full_command)
                 self.ser_outlet.flush()
-                # --- MODIFICATION: Use read_until for MKS controllers ---
-                response_bytes = self.ser_outlet.read_until(b'\r')
+                response_bytes = self.ser_outlet.readline()
                 return response_bytes.decode('ascii', errors='ignore').strip()
             except serial.SerialTimeoutException:
                 self.log_queue.put("ERROR: Write timeout on Outlet Controller query!")
@@ -167,6 +176,7 @@ class StateMachinePressureController:
 
     def _run_adaptive_outlet_loop(self):
         while not self._stop_event.is_set() and not self.e_stop_event.is_set():
+            # --- NEW: Check for manual override cooldown ---
             if self.manual_override_active.is_set():
                 time.sleep(1.0)
                 continue

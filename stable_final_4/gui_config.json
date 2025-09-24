@@ -1,8 +1,8 @@
 {
-    "inlet_com": "COM5",
-    "outlet_com": "COM6",
+    "inlet_com": "COM8",
+    "outlet_com": "COM5",
     "daq_ip": "192.168.1.238",
-    "turbo_com": "COM8",
+    "turbo_com": "COM6",
     "std_fs": "0.1",
     "tech_id": "TH",
     "duts": [

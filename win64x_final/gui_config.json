@@ -1,12 +1,21 @@
 {
-    "inlet_com": "/dev/ttyUSB0",
-    "outlet_com": "/dev/ttyUSB1",
-    "turbo_com": "/dev/ttyUSB2",
+    "inlet_com": "COM8",
+    "outlet_com": "COM5",
+    "turbo_com": "COM6",
     "std_fs": "0.1 Torr",
     "tech_id": "TH",
     "duts": [
         {
-            "enabled": false,
+            "enabled": true,
+            "fs": "1.0",
+            "model": "",
+            "serial": "",
+            "wip": "",
+            "customer": "Applied Materials",
+            "item_number": "1350-00856"
+        },
+        {
+            "enabled": true,
             "fs": "0.1",
             "model": "",
             "serial": "",
@@ -15,7 +24,7 @@
             "item_number": "1350-00856"
         },
         {
-            "enabled": false,
+            "enabled": true,
             "fs": "0.1",
             "model": "",
             "serial": "",
@@ -24,16 +33,7 @@
             "item_number": "1350-00856"
         },
         {
-            "enabled": false,
-            "fs": "0.1",
-            "model": "",
-            "serial": "",
-            "wip": "",
-            "customer": "Applied Materials",
-            "item_number": "1350-00856"
-        },
-        {
-            "enabled": false,
+            "enabled": true,
             "fs": "0.1",
             "model": "",
             "serial": "",

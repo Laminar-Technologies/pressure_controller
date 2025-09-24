@@ -40,7 +40,7 @@ class CalibrationGUI(tk.Tk):
         super().__init__()
 
         self.title("Multi-Device Adaptive Calibration System (Raspberry Pi Edition)")
-        self.attributes('-zoomed', True)
+        self.state('zoomed') # <-- CORRECTED LINE FOR WINDOWS
         self.rowconfigure(1, weight=1)
         self.columnconfigure(0, weight=1)
 
@@ -59,7 +59,7 @@ class CalibrationGUI(tk.Tk):
         self.standard_fs_ranges = {
             1: 0.1,
             2: 10.0,
-            3: 1.0
+            3: 1000.0
         }
 
         self.active_duts = []
@@ -410,6 +410,7 @@ class CalibrationGUI(tk.Tk):
         self.close_inlet_valve_button = tk.Button(valve_status_frame, text="Close", command=self._close_inlet_valve, state=tk.DISABLED)
         self.close_inlet_valve_button.grid(row=6, column=1, pady=2)
 
+
         pressure_readout_frame = tk.LabelFrame(top_status_frame, text="Live System Pressure", padx=10, pady=10)
         pressure_readout_frame.grid(row=0, column=4, sticky="nsew", padx=(5,0))
         tk.Label(pressure_readout_frame, textvariable=self.live_pressure_var, font=("Helvetica", 22, "bold")).pack(pady=(0,5))
@@ -471,13 +472,21 @@ class CalibrationGUI(tk.Tk):
             self.daq.select_channel(channel)
             
             if standard_fs <= 1.0:
-                self.daq.set_range(0.01)
+                self.daq.set_range('0.01')
             elif standard_fs <= 100.0:
-                self.daq.set_range(0.1)
+                self.daq.set_range('0.1')
             else:
-                self.daq.set_range(1)
-        else:
-            pass
+                self.daq.set_range('1')
+            
+            if self.state_controller:
+                self.state_controller.update_full_scale_pressure(standard_fs)
+            
+            self.configure_plots()
+            
+            fs_key = str(self.standard_fs_value)
+            raw_data = self.learned_data.get(fs_key, {})
+            self.learned_outlet_positions = {float(k): v for k, v in raw_data.items()}
+            self.log_message(f"Activated learning profile for {fs_key} Torr FS ({len(self.learned_outlet_positions)} points).")
 
     def toggle_connection(self):
         if self.is_connected:
@@ -500,7 +509,7 @@ class CalibrationGUI(tk.Tk):
         self.connect_button.config(text="Connect", state=tk.NORMAL)
         self.set_config_state(tk.NORMAL)
 
-        for btn in [self.start_button, self.manual_cal_button, self.e_stop_button, self.set_pressure_button, self.fine_outlet_open_button, self.fine_closed_button, self.coarse_outlet_open_button, self.coarse_closed_button, self.close_valve_button, self.open_outlet_button, self.open_inlet_button, self.fine_inlet_open_button, self.coarse_inlet_open_button, self.fine_inlet_closed_button, self.coarse_inlet_closed_button, self.pump_button, self.vent_button]:
+        for btn in [self.start_button, self.manual_cal_button, self.e_stop_button, self.set_pressure_button, self.fine_outlet_open_button, self.fine_closed_button, self.coarse_outlet_open_button, self.coarse_closed_button, self.close_valve_button, self.open_outlet_button, self.open_inlet_button, self.fine_inlet_open_button, self.coarse_inlet_open_button, self.fine_inlet_closed_button, self.coarse_inlet_closed_button, self.pump_button, self.vent_button, self.close_inlet_valve_button]:
             btn.config(state=tk.DISABLED)
 
         self.log_message("All instruments disconnected. Ready to reconfigure.")
@@ -522,13 +531,15 @@ class CalibrationGUI(tk.Tk):
             )
             self.log_message(f"Connected to Controllers on {inlet_port} & {outlet_port}.")
 
-            self.daq = DAQController(host='<Raspberry Pi IP Address>', port=65432) # Replace with your Raspberry Pi's IP address
+            self.daq = DAQController(host='192.168.1.238', port=65432, log_queue=self.log_queue) # Replace with your Raspberry Pi's IP address
             self.log_message(f"Initialized DAQ controller.")
 
             self.turbo_controller = TurboController(turbo_port, self.log_queue)
             self.log_message(f"Connected to Turbo on {turbo_port}.")
 
-            self.on_standard_change()
+            # The DAQ now handles multiplexer commands, so we call on_standard_change
+            # after the DAQ is confirmed connected to send the initial setup commands.
+            self.on_standard_change() 
 
             self.state_controller.start()
             self.turbo_controller.start()
@@ -581,7 +592,7 @@ class CalibrationGUI(tk.Tk):
 
         self.start_time = time.time()
 
-        for btn in [self.start_button, self.manual_cal_button, self.standby_button, self.nominal_button, self.start_pump_button, self.stop_pump_button, self.set_pressure_button, self.fine_outlet_open_button, self.fine_closed_button, self.coarse_outlet_open_button, self.coarse_closed_button, self.close_valve_button, self.open_outlet_button, self.open_inlet_button, self.fine_inlet_open_button, self.coarse_inlet_open_button, self.fine_inlet_closed_button, self.coarse_inlet_closed_button, self.pump_button, self.vent_button]:
+        for btn in [self.start_button, self.manual_cal_button, self.standby_button, self.nominal_button, self.start_pump_button, self.stop_pump_button, self.set_pressure_button, self.fine_outlet_open_button, self.fine_closed_button, self.coarse_outlet_open_button, self.coarse_closed_button, self.close_valve_button, self.open_outlet_button, self.open_inlet_button, self.fine_inlet_open_button, self.coarse_inlet_open_button, self.fine_inlet_closed_button, self.coarse_inlet_closed_button, self.pump_button, self.vent_button, self.close_inlet_valve_button]:
             btn.config(state=tk.NORMAL)
         self.e_stop_button.config(state=tk.NORMAL)
         self.set_config_state(tk.DISABLED)
@@ -718,7 +729,7 @@ class CalibrationGUI(tk.Tk):
     def _coarse_bump_inlet_closed(self):
         self._activate_manual_override_cooldown()
         self._bump_inlet_valve(-1.0)
-
+        
     def _close_inlet_valve(self):
         self._activate_manual_override_cooldown()
         if self.state_controller and self.state_controller.is_connected:
@@ -825,7 +836,7 @@ class CalibrationGUI(tk.Tk):
             self.log_message("  Command sent.")
         else:
             self.log_message("Controller not connected.")
-
+    
     def set_config_state(self, state):
         widgets_to_toggle = [
             self.inlet_com_combo, self.outlet_com_combo,
@@ -833,6 +844,7 @@ class CalibrationGUI(tk.Tk):
             self.service_type_combo, self.std_id_combo
         ]
         for widget in widgets_to_toggle:
+            # ttk widgets use 'state', tk widgets use 'state' config
             try:
                 widget.config(state=state)
             except tk.TclError:
@@ -852,7 +864,7 @@ class CalibrationGUI(tk.Tk):
 
             if self.is_in_manual_mode:
                 self.toggle_manual_mode()
-
+            
             self._shutdown_system()
         else:
             self._shutdown_system()
@@ -865,11 +877,11 @@ class CalibrationGUI(tk.Tk):
     def resume_from_estop(self):
         self.log_message("Resuming operations...")
         self.e_stop_triggered_event.clear()
-
+        
         self.start_button.config(state=tk.NORMAL)
         self.manual_cal_button.config(state=tk.NORMAL)
         self.resume_button.config(state=tk.DISABLED)
-
+        
         if self.state_controller:
             self.state_controller.start()
 
@@ -885,9 +897,9 @@ class CalibrationGUI(tk.Tk):
             line, = self.ax_live_pressure.plot([], [], color=self.dut_colors[i], label=f'DUT {i+1}')
             self.live_dut_plots[i] = line
         self.ax_live_pressure.legend(loc='upper left')
-
-        self.on_main_focus_change()
-
+        
+        self.on_main_focus_change() # Configure the right plot based on focus
+        
         self.canvas.draw_idle()
 
     def _setup_error_plot(self, setpoints):
@@ -902,7 +914,7 @@ class CalibrationGUI(tk.Tk):
             padding = (max_sp - min_sp) * 0.1
             if padding < 1e-6:
                 padding = self.standard_fs_value * 0.05 if hasattr(self, 'standard_fs_value') else 0.1
-
+            
             self.ax_error.set_ylim(min_sp - padding, max_sp + padding)
 
         self.ax_error.axvline(0, color='k', linestyle='--', alpha=0.5)
@@ -933,13 +945,13 @@ class CalibrationGUI(tk.Tk):
                 self._draw_turbine(self.turbo_controller.rpm)
 
                 flags = self.turbo_controller.status_flags
-
+                
                 if self.e_stop_triggered_event.is_set():
                     self.led_starting.config(bg='gray')
                     self.led_at_speed.config(bg='gray')
                 else:
                     self.led_starting.config(bg=self.starting_color if flags.get('accelerating', False) else 'gray')
-
+                    
                     if flags.get('decelerating', False):
                         blink_on = int(time.time() * 4) % 2 == 0
                         self.led_at_speed.config(bg=self.at_speed_color if blink_on else 'gray')
@@ -947,13 +959,13 @@ class CalibrationGUI(tk.Tk):
                         self.led_at_speed.config(bg=self.at_speed_color)
                     else:
                         self.led_at_speed.config(bg='gray')
-
+                
                 self.led_fault.config(bg='red' if flags.get('fault', False) else 'gray')
                 self.led_standby.config(bg=self.starting_color if flags.get('standby', False) else 'gray')
 
 
             if self.state_controller and self.state_controller.is_connected:
-                std_pressure = self.state_controller.get_pressure() 
+                std_pressure = self.state_controller.current_pressure
                 inlet_pos = self.state_controller.inlet_valve_pos
                 outlet_pos = self.state_controller.outlet_valve_pos
                 
@@ -1024,7 +1036,7 @@ class CalibrationGUI(tk.Tk):
                         is_active = any(d['channel'] == i for d in local_active_duts)
                         is_completed = i in self.completed_duts
                         line.set_visible(is_active and not is_completed)
-
+                        
                         if len(self.live_time_history) == len(self.live_dut_pressure_history[i]):
                             line.set_data(self.live_time_history, self.live_dut_pressure_history[i])
                         else:
@@ -1039,7 +1051,7 @@ class CalibrationGUI(tk.Tk):
                         if t >= t_min_main:
                             start_index = i
                             break
-
+                    
                     visible_pressures = []
                     if self.live_std_pressure_history:
                         valid_std = [p for p in list(self.live_std_pressure_history)[start_index:] if p is not None and not np.isnan(p)]
@@ -1049,23 +1061,27 @@ class CalibrationGUI(tk.Tk):
                         if any(d['channel'] == i for d in local_active_duts) and i not in self.completed_duts:
                             valid_dut = [p for p in list(history)[start_index:] if p is not None and not np.isnan(p)]
                             if valid_dut: visible_pressures.extend(valid_dut)
-
+                    
                     if visible_pressures:
                         min_p, max_p = min(visible_pressures), max(visible_pressures)
                         padding = (max_p - min_p) * 0.1 if max_p > min_p else self.standard_fs_value * 0.05
                         if padding == 0: padding = self.standard_fs_value * 0.05
                         self.ax_live_pressure.set_ylim(bottom=min_p - padding, top=max_p + padding)
-
+                    
+                    # Conditionally update right plot based on focus
                     if self.main_focus_channel is None:
+                        # This plot is the error bar chart, updated via callbacks in Auto_Cal_Logic
                         pass
-                    else: 
+                    else: # A DUT is focused, update the live trace plot
                         ch = self.main_focus_channel
                         if self.focus_trace_std_plot and self.focus_trace_dut_plot:
+                            # Set data for the focus plots
                             self.focus_trace_std_plot.set_data(self.live_time_history, self.live_std_pressure_history)
                             self.focus_trace_dut_plot.set_data(self.live_time_history, self.live_dut_pressure_history[ch])
 
+                            # --- Dynamic Axis Scaling for Focus Plot ---
                             t_max_focus = self.live_time_history[-1] if self.live_time_history else 0
-                            t_min_focus = max(0, t_max_focus - 30)
+                            t_min_focus = max(0, t_max_focus - 30) # 30 second window
                             self.ax_error.set_xlim(t_min_focus, t_max_focus + 1)
 
                             start_index_focus = 0
@@ -1084,7 +1100,7 @@ class CalibrationGUI(tk.Tk):
                                 min_p_focus = min(focus_visible_pressures)
                                 max_p_focus = max(focus_visible_pressures)
                                 padding_focus = (max_p_focus - min_p_focus) * 0.1
-                                if padding_focus < 1e-6:
+                                if padding_focus < 1e-6: # Handle flat line case
                                     padding_focus = self.standard_fs_value * 0.01
                                 self.ax_error.set_ylim(bottom=min_p_focus - padding_focus, top=max_p_focus + padding_focus)
 
@@ -1094,12 +1110,12 @@ class CalibrationGUI(tk.Tk):
                     manual_visible_pressures = []
                     valid_manual_std = [p for p in self.manual_trace_std if p is not None and not np.isnan(p)]
                     if valid_manual_std: manual_visible_pressures.extend(valid_manual_std)
-
+                    
                     for i, history in self.manual_trace_duts.items():
                          if any(d['channel'] == i for d in local_active_duts):
                             valid_dut = [p for p in history if p is not None and not np.isnan(p)]
                             if valid_dut: manual_visible_pressures.extend(valid_dut)
-
+                    
                     y_bottom, y_top = self.ax_live_pressure.get_ylim()
                     if manual_visible_pressures:
                         min_p, max_p = min(manual_visible_pressures), max(manual_visible_pressures)
@@ -1149,17 +1165,19 @@ class CalibrationGUI(tk.Tk):
             traceback.print_exc()
 
         self.after_id = self.after(250, self.periodic_update)
-
+        
     def on_main_focus_change(self):
         """ Handles switching the right plot between overall error and single DUT trace. """
         focus_id = self.main_focus_device.get()
         if focus_id == 'std':
             self.main_focus_channel = None
+            # Restore the bar chart
             self._setup_error_plot(list(self.error_plot_data.keys()))
-            self.update_error_plot()
+            self.update_error_plot() # Redraw with current data
         else:
             ch = int(focus_id.replace('ch',''))
             self.main_focus_channel = ch
+            # Setup the new focus trace plot
             self._setup_focus_trace_plot()
 
     def _setup_focus_trace_plot(self):
@@ -1524,7 +1542,7 @@ class CalibrationGUI(tk.Tk):
     def analyze_and_suggest_tuning(self):
         with self.active_duts_lock:
             suggestion_reports, plot_filenames, self.dut_pass_status = generate_tuning_suggestions(self.data_storage, self.active_duts)
-
+        
         if suggestion_reports:
             self.show_tuning_suggestions_window(suggestion_reports, plot_filenames)
         else:
@@ -1568,14 +1586,14 @@ class CalibrationGUI(tk.Tk):
     def _pump_to_vacuum(self):
         self.is_pumping_down = True
         threading.Thread(target=self._pump_to_vacuum_thread, daemon=True).start()
-
+            
     def _pump_to_vacuum_thread(self):
         if self._wait_for_turbo_ready("Pump to Vacuum"):
             if self.state_controller and not self.e_stop_triggered_event.is_set():
                 self.log_message("Pumping system to vacuum...")
                 self.state_controller.set_pressure(0)
         self.is_pumping_down = False
-
+            
     def _vent_system(self):
         threading.Thread(target=self._vent_system_thread, daemon=True).start()
 
@@ -1583,7 +1601,7 @@ class CalibrationGUI(tk.Tk):
         if not self.state_controller: return
         self.log_message("VENT: Closing outlet valve...")
         self.state_controller._write_to_outlet("C")
-
+        
         timeout = time.time() + 15
         while time.time() < timeout:
             if self.state_controller.outlet_valve_pos is not None and self.state_controller.outlet_valve_pos < 0.1:
@@ -1620,9 +1638,9 @@ class CalibrationGUI(tk.Tk):
         self.is_calibrating = False; self.is_in_manual_mode = False
 
         if self.after_id: self.after_cancel(self.after_id)
-
+        
         if self.turbo_controller: self.turbo_controller.send_command("SBY")
-
+        
         if self.state_controller: self.state_controller.close()
         if self.daq: self.daq.close()
         if self.turbo_controller: self.turbo_controller.stop()
@@ -1630,6 +1648,9 @@ class CalibrationGUI(tk.Tk):
         self.quit()
         self.destroy()
 
+# =================================================================================
+# Main Execution Block
+# =================================================================================
 if __name__ == "__main__":
     app = CalibrationGUI()
     app.mainloop()

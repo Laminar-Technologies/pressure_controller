@@ -64,7 +64,7 @@ class TurboController:
             except serial.SerialException as e:
                 self.log_queue.put(f"ERROR: Turbo serial error: {e}")
                 self.is_connected = False
-
+                
     def _run_polling_loop(self):
         """Background thread to continuously poll the turbo pump for status using the STA command."""
         while not self._stop_event.is_set():
